@@ -1,0 +1,476 @@
+__author__ = "PedroCR"
+
+import numpy as np
+import pandas as pd
+from essential_life.mortality_table import MortalityTable
+
+
+# todo: confirm all the messages
+class CommutationFunctions(MortalityTable):
+    '''
+    Instantiates for a specific mortality table and interest rate, all the usual commutation functions.
+    '''
+
+    def __init__(self, i=None, g=0, data_type='q', mt=None, perc=100, app_cont=False):
+        '''
+        Instantiates, for a specific mortality table and interest rate, the usual commutation functions Dx, Nx, Sx, Cx, Mx, Rx.
+
+        :param i: interest rate, e.g. 2 for 2%
+        :param g: geometric rate of growth, e.g. 5 for 5%
+        :param data_type: Use "l" for lx, "p" for px and "q" for qx.
+        :param mt: the mortality table in array format, according to the data_type defined
+        :param perc: The percentage of qx to use, e.g., use 50 for 50%.
+        :param app_cont: Boolean value. True for "Moment of Death" and False for "End of the Period"
+
+        :return: Actuarial Table
+        '''
+        MortalityTable.__init__(self, data_type, mt, perc)
+        if i is None:
+            return
+        self.i = i / 100.
+        self.g = g / 100.
+        self.v = 1 / (1 + self.i)
+        self.d = (1 + self.g) / (1 + self.i)
+        self.app_cont = app_cont
+        self.cont = np.sqrt(1 + self.i)
+
+        # self.Dx = np.array([self.lx[x] * np.power(self.d, x) for x in range(len(self.lx))])
+        self.Dx = self.lx[:-1] * np.power(self.d, range(len(self.lx[:-1])))
+        self.Nx = np.array([np.sum(self.Dx[x:]) for x in range(len(self.lx[:-1]))])
+        self.Sx = np.array([np.sum(self.Nx[x:]) for x in range(len(self.Nx))])
+        self.Cx = self.dx * np.power(self.d, range(1, len(self.dx) + 1))
+        self.Mx = np.array([np.sum(self.Cx[x:]) for x in range(len(self.Cx))])
+        self.Rx = np.array([np.sum(self.Mx[x:]) for x in range(len(self.Mx))])
+        if self.app_cont:
+            self.Mx = self.Mx * self.cont
+            self.Rx = self.Rx * self.cont
+
+    def df_commutation_table(self):
+        '''
+        Builds the commutation symbols for a given mortality table and interest rate
+        result: Dataframe with Commutation Symbols
+        '''
+        data = {'Dx': self.Dx, 'Nx': self.Nx, 'Sx': self.Sx, 'Cx': self.Cx, 'Mx': self.Mx, 'Rx': self.Rx}
+        df = pd.DataFrame(data)
+        data_lf = self.df_life_table()
+        df = pd.concat([data_lf, df], axis=1, sort=False)
+        return df
+
+    # life insurances
+    def nEx(self, x, n):
+        """
+        Pure endowment or Deferred capital
+        :param x: age at the beginning of the contract
+        :param n: years until payment, if x is alive
+        :return: the present value of a pure endowment of 1 at age x+n. It is also commonly referred to as the Actuarial Value or Actuarial Present Value.
+        """
+        if x < 0:
+            return np.nan
+        if n <= 0:
+            return 1
+        if x + n > self.w:
+            return 0.
+        D_x = self.Dx[x]
+        D_x_n = self.Dx[x + n]
+        self.msn.append(f"{n}_E_{x}={D_x_n} / {D_x}")
+        # note: nEx discounts the growth rate np.power(1 + self.g, defer + 1) so only survival is considered
+        return D_x_n / D_x / np.power(1 + self.g, n)
+
+    def Ax(self, x):
+        """
+        Whole Life Insurance
+        :param x: age at the beginning of the contract
+        :return: Expected Present Value (EPV) of a Whole Life Insurance (i.e. net single premium), that pays 1, at the
+        end of the year of death.
+        """
+        if x < 0:
+            return np.nan
+        if x > self.w:
+            return self.v  # it will die before year's end, because already attained age>w
+        D_x = self.Dx[x]
+        if self.app_cont:
+            M_x = self.Mx[x] / self.cont
+        else:
+            M_x = self.Mx[x]
+        self.msn.append(f"A_{x}={M_x} / {D_x}")
+        return M_x / D_x / (1 + self.g)
+
+    def IAx(self, x):
+        """
+        Whole life insurance
+        :param x: age at the beginning of the contract
+        :return: Expected Present Value (EPV) of a increasing whole life insurance (i.e. net single premium), that pays 1+m, at the
+        end of the year of death, if death happens between age x+m and x+m+1.
+        """
+        if x < 0:
+            return np.nan
+        if x > self.w:
+            return self.v  # it will die before year's end, because already attained age>w
+        D_x = self.Dx[x]
+        if self.app_cont:
+            R_x = self.Rx[x] / self.cont
+        else:
+            R_x = self.Rx[x]
+        self.msn.append(f"A_{x}={R_x} / {D_x}")
+        return R_x / D_x
+
+    def Ax_(self, x):
+        """
+        Whole Life Insurance
+        :param x: age at the beginning of the contract
+        :return: Expected Present Value (EPV) of a whole life insurance (i.e. net single premium), that pays 1, at the
+        moment of death.
+        """
+        if x < 0:
+            return np.nan
+        if x > self.w:  # it will die before year's end, because already attained age>w
+            return self.v ** .5
+        D_x = self.Dx[x]
+        if self.app_cont:
+            M_x = self.Mx[x]
+        else:
+            M_x = self.Mx[x] * self.cont
+        self.msn.append(f"A_{x}_={M_x} / {D_x}")
+        return M_x / D_x / (1 + self.g)
+
+    def nAx(self, x, n):
+        """
+        Term Life Insurance
+        :param x: age at the beginning of the contract
+        :param n: period of the contract
+        :return: Expected Present Value (EPV) of a term (temporary) life insurance (i.e. net single premium), that
+        pays 1, at the end of the year of death.
+        """
+        if x < 0:
+            return np.nan
+        if n < 0:
+            return np.nan
+        if x + n > self.w:
+            return self.Ax(x)
+        D_x = self.Dx[x]
+        if self.app_cont:
+            M_x = self.Mx[x] / self.cont
+            M_x_n = self.Mx[x + n] / self.cont
+        else:
+            M_x = self.Mx[x]
+            M_x_n = self.Mx[x + n]
+        self.msn.append(f"{n}_A_{x}=({M_x}-{M_x_n}) / {D_x}")
+        return (M_x - M_x_n) / D_x / (1 + self.g)
+
+    def nIAx(self, x, n):
+        """
+        Whole life insurance
+        :param x: age at the beginning of the contract
+        :param n: period of the contract
+        :return: Expected Present Value (EPV) of a increasing whole life insurance (i.e. net single premium), that pays 1+m, at the
+        end of the year of death, if death happens between age x+m and x+m+1.
+        """
+        if x < 0:
+            return np.nan
+        if n < 0:
+            return np.nan
+        if x > self.w:
+            return self.v  # it will die before year's end, because already attained age>w
+        D_x = self.Dx[x]
+        if self.app_cont:
+            M_x_n = self.Mx[x + n] / self.cont
+            R_x = self.Rx[x] / self.cont
+            R_x_n = self.Rx[x + n] / self.cont
+        else:
+            M_x_n = self.Mx[x + n]
+            R_x = self.Rx[x]
+            R_x_n = self.Rx[x + n]
+        self.msn.append(f"A_{x}=({R_x}-{R_x_n}-{n}x{M_x_n} / {D_x}")
+        return (R_x - R_x_n - n * M_x_n) / D_x
+
+    def nAx_(self, x, n):
+        """
+        Term life insurance
+        :param x: age at the beginning of the contract
+        :param n: period of the contract
+        :return: Expected Present Value (EPV) of a term (temporary) life insurance (i.e. net single premium), that
+        pays 1, at the moment of death.
+        """
+        if x < 0:
+            return np.nan
+        if n < 0:
+            return np.nan
+        if x + n > self.w:
+            return self.Ax(x) * self.cont
+        D_x = self.Dx[x]
+        if self.app_cont:
+            M_x = self.Mx[x]
+            M_x_n = self.Mx[x + n]
+        else:
+            M_x = self.Mx[x] * self.cont
+            M_x_n = self.Mx[x + n] * self.cont
+        self.msn.append(f"{n}_A_{x}_=({M_x}-{M_x_n}) / {D_x}")
+        return (M_x - M_x_n) / D_x / (1 + self.g)
+
+    def nAEx(self, x, n):
+        """
+        Endowment Insurance
+        :param x: age at the beginning of the contract
+        :param n: period of the contract
+        :return: Expected Present Value (EPV) of an Endowment life insurance (i.e. net single premium), that
+        pays 1, at the end of year of death or 1 if x survives to age x+n.
+        """
+        self.msn.append(f"{n}_AE_{x}={n}_A_{x}+{n}_E_{x}")
+        return self.nAx(x, n) + self.nEx(x, n)
+
+    def nAEx_(self, x, n):
+        """
+        Endowment insurance
+        :param x: age at the beginning of the contract
+        :param n: period of the contract
+        :return: Expected Present Value (EPV) of an Endowment life insurance (i.e. net single premium), that
+        pays 1, at the moment of death or 1 if x survives to age x+n.
+        """
+        aux = self.nAx_(x, n) + self.nEx(x, n)
+        self.msn.append(f"{n}_AE_{x}_={n}_A_{x}_+{n}_E_{x}")
+        return aux
+
+    # deferred life insurances
+    def t_Ax(self, x, defer=0):
+        """
+        Deferred Whole life insurance
+        :param x: age at the beginning of the contract
+        :param defer: deferment period, in years
+        :return: Expected Present Value (EPV) of a whole life insurance with a deferment period ot t years
+        (i.e. net single premium), that pays 1, at the end of the year of death.
+        """
+        aux = self.nEx(x, defer) * self.Ax(x + defer)
+        self.msn.append(f"{defer}|_A_{x}={defer}_E_{x}*A_{x + defer}")
+        return aux
+
+    def t_Ax_(self, x, defer=0):
+        """
+        Deferred Whole life insurance
+        :param x: age at the beginning of the contract
+        :param defer: deferment period, in years
+        :return: Expected Present Value (EPV) of a whole life insurance with a deferment period ot t years
+        (i.e. net single premium), that pays 1, at the moment of death.
+        """
+        aux = self.nEx(x, defer) * self.Ax_(x + defer)
+        self.msn.append(f"{defer}|_A_{x}_={defer}_E_{x}*A_{x + defer}_")
+        return aux
+
+    def t_nAx(self, x, n, defer=0):
+        """
+        Deferred Term life insurance
+        :param x: age at the beginning of the contract
+        :param n: period of the contract
+        :param defer: deferment period, in years
+        :return: Expected Present Value (EPV) of a term (temporary) deferred life insurance (i.e. net single premium), that
+        pays 1, at the end of the year of death.
+        """
+        aux = self.nEx(x, defer) * self.nAx(x + defer, n)
+        self.msn.append(f"{defer}|{n}_A_{x}={defer}_E_{x}*{n}_A_{x + defer}")
+        return aux
+
+    def t_nAx_(self, x, n, defer=0):
+        """
+        Deferred Term life insurance
+        :param x: age at the beginning of the contract
+        :param n: period of the contract
+        :param defer: deferment period, in years
+        :return: Expected Present Value (EPV) of a term (temporary) deferred life insurance (i.e. net single premium), that
+        pays 1, at the moment of death.
+        """
+        aux = self.nEx(x, defer) * self.nAx_(x + defer, n)
+        self.msn.append(f"{defer}|{n}_A_{x}_={defer}_E_{x}*{n}_A_{x + defer}_")
+        return aux
+
+    def t_nAEx(self, x, n, defer=0):
+        """
+        Deferred Endowment Insurance
+        :param x: age at the beginning of the contract
+        :param n: period of the contract
+        :param defer: deferment period, in years
+        :return: Expected Present Value (EPV) of a deferred Endowment Life Insurance (i.e. net single premium), that
+        pays 1, at the end of year of death (if it occurs between ages x+t and x+t+n) or 1 if x survives to age x+t+n.
+        """
+        aux = self.nEx(x, defer) * self.nAEx(x + defer, n)
+        self.msn.append(f"{defer}|{n}_AE_{x}={defer}_E_{x}*{n}_AE_{x + defer}")
+        return aux
+
+    def t_nAEx_(self, x, n, defer=0):
+        """
+        Deferred Endowment insurance
+        :param x: age at the beginning of the contract
+        :param n: period of the contract
+        :param defer: deferment period, in years
+        :return: Expected Present Value (EPV) of an Endowment life insurance (i.e. net single premium), that
+        pays 1, at the moment of death (if it occurs between ages x+t and x+t+n) or 1 if x survives to age x+t+n.
+        """
+        aux = self.nEx(x, defer) * self.nAEx_(x + defer, n)
+        self.msn.append(f"{defer}|{n}_AE_{x}={defer}_E_{x}*{n}_AE_{x + defer}_")
+        return aux
+
+    # life annuities_1
+    def ax(self, x, m=1):
+        """
+        axn : Returns the actuarial present value of an (immediate) annuity of 1 per time period
+        (whole life annuity-late). Payable 'm' times per year at the end of the fractions of time.
+        :param x: age at the beginning of the contract
+        :param m: number of payments per period used to quote the interest rate
+        :return:Expected Present Value (EPV) for a whole life immediate annuity, with payments of 1/m
+        """
+        if x < 0:
+            return np.nan
+        if m < 0:
+            return np.nan
+        if x >= self.w:
+            return 0
+        aux = self.Nx[x + 1] / self.Dx[x] / (1 + self.g) + (m - 1) / (m * 2)
+        self.msn.append(f"ax_{x}={self.Nx[x + 1]}/{self.Dx[x]}+({m}-1)/({m}*2)")
+        return aux
+
+    def aax(self, x, m=1):
+        """
+        äxn : Returns the actuarial present value of a (due) life annuity of 1 per time period
+        (whole life annuity-anticipatory). Payable 'm' times per year at the beginning of the fractions of time.
+        :param x: age at the beginning of the contract
+        :param m: number of payments per period used to quote the interest rate
+        :return:Expected Present Value (EPV) for a whole life annuity due, with payments of 1/m
+        """
+        if x > self.w:
+            return 1
+        aux = self.Nx[x] / self.Dx[x] - (m - 1) / (m * 2)
+        self.msn.append(f"aax_{x}={self.Nx[x]}/{self.Dx[x]}-({m}-1)/({m}*2)")
+        return aux
+
+    def nax(self, x, n, m=1):
+        """
+        axn : Return the actuarial present value of an (immediate) n-year temporary annuity
+        Payable 'm' times per year at the end of the fractions of time
+        :param x: age at the beginning of the contract
+        :param n: number of total periods of the interest rate used
+        :param m: number of payments per period used to quote the interest rate
+        :return:Expected Present Value (EPV) for an immediate temporary life annuity, with payments of 1/m
+        """
+        if x >= self.w:
+            return 0
+        if x < 0:
+            return np.nan
+        if m < 0:
+            return np.nan
+        if n < 0:
+            return 0
+
+        if x + 1 + n <= self.w:
+            aux = (self.Nx[x + 1] - self.Nx[x + 1 + n]) / self.Dx[x] / (1 + self.g) + \
+                  (m - 1) / (m * 2) * (1 - self.nEx(x, n))
+            self.msn.append(f"{n}_ax_{x}={self.Nx[x + 1] - self.Nx[x + 1 + n]}/{self.Dx[x]}+({m}-1)/({m}*2)*"
+                            f"(1-{self.Dx[x + n]}/{self.Dx[x]})")
+        else:
+            return self.ax(x=x, m=m)
+
+        return aux
+
+    def naax(self, x, n, m=1):
+        """
+        näx : Return the actuarial present value of a due n-year temporary life annuity
+        Payable 'm' per year at the beginning of the fractions of time
+        :param x: age at the beginning of the contract
+        :param n: number of total periods of the interest rate used
+        :param m: number of payments per period used to quote the interest rate
+        :return: Expected Present Value (EPV) a temporary due life annuity, with payments of 1/m
+        """
+        if x >= self.w or n == 1:
+            return 1
+        if x < 0:
+            return np.nan
+        if m < 0:
+            return np.nan
+        if n < 0:
+            return 0
+
+        if x + 1 + n <= self.w + 1:  # todo we've here a problem, because of the fractional approximation
+            aux = (self.Nx[x] - self.Nx[x + n]) / self.Dx[x] - (m - 1) / (m * 2) * (1 - self.nEx(x, n))
+            if x + 1 + n <= self.w:
+                Nx2 = self.Nx[x + 1 + n]
+            else:
+                Nx2 = 0
+            self.msn.append(
+                f"{n}_aax_{x}={self.Nx[x + 1] - Nx2}/{self.Dx[x]}*(1+{self.g}) + ({m}+1)/({m}*2)*"
+                f"(1-{self.Dx[x + n]}/{self.Dx[x]})")
+        else:
+            return self.aax(x=x, m=m)
+        return aux
+
+    # deferred annuities_1
+    def t_ax(self, x, m=1, defer=0):
+        """
+        axn : Returns the actuarial present value of an (immediate) annuity of 1 per time period
+        deferred of t periods. Payable 'm' times per year at the ends of the fractions of time
+        :param x: age at the beginning of the contract
+        :param m: number of payments per period used to quote the interest rate
+        :param defer: deferment period, in years
+        :return:Expected Present Value (EPV) for payments of 1/m per fraction of time
+        """
+        # note: nEx discounts the growth rate np.power(1 + self.g, defer + 1)
+        aux = self.ax(x + defer, m) * self.nEx(x, defer)
+        if aux > 0:
+            self.msn.append(f"{defer}_ax_{x}=[{self.Nx[x + 1 + defer]}/{self.Dx[x + defer]}+({m} + 1)/({m}*2)]"
+                            f"*{self.Dx[x + defer]}/{self.Dx[x]}")
+        return aux
+
+    def t_aax(self, x, m=1, defer=0):
+        """
+        äxn : Returns the actuarial present value of a due temporary life annuity of 1 per time period,
+        deferred t periods. Payable 'm' per year at the beginning of the fractions of time
+        :param x: age at the beginning of the contract
+        :param m: number of payments per period used to quote the interest rate
+        :param defer: deferment period, in years
+        :return:Expected Present Value (EPV) for payments of 1/m per fraction of time
+        """
+        aux = self.aax(x + defer, m) * self.nEx(x, defer)
+        if x + defer < self.w:
+            self.msn.append(f"{defer}_aax_{x}=[{self.Nx[x + defer]}/{self.Dx[x + defer]}-({m}-1)/({m}*2)]"
+                            f"*{self.Dx[x + defer]}/{self.Dx[x]}")
+        return aux
+
+    def t_nax(self, x, n, m=1, defer=0):
+        """
+        axn : Return the actuarial present value of a (immediate) n-year temporary life annuity, deferred t periods.
+        Payable 'm' per year at the ends of the fractions of time
+        :param x: age at the beginning of the contract
+        :param n: number of total periods of the interest rate used
+        :param m: number of payments per period used to quote the interest rate
+        :param defer: deferment period, in years
+        :return:Expected Present Value (EPV) for payments of 1/m per fraction of time
+        """
+        aux = self.nax(x + defer, n, m) * self.nEx(x, defer)
+        if x + 1 + n + defer <= self.w:
+            self.msn.append(
+                f"{defer}|{n}_ax_{x}=[{self.Nx[x + 1 + defer] - self.Nx[x + 1 + n + defer]}/{self.Dx[x + defer]}"
+                f"+ ({m}-1)/({m}*2)*(1-{self.Dx[x + n + defer]}/{self.Dx[x + defer]})]"
+                f"*{self.Dx[x + defer]}/{self.Dx[x]}")
+        else:
+            return self.t_ax(x=x, m=m, defer=defer)
+        return aux
+
+    def t_naax(self, x, n, m=1, defer=0):
+        """
+        näx : Return the actuarial present value of a due n-year temporary life annuity, deferred t periods and payable
+        'm' times per year at the beginning of the fractions of time
+        :param x: age at the beginning of the contract
+        :param n: number of total periods of the interest rate used
+        :param m: number of payments per period used to quote the interest rate
+        :param defer: deferment period
+        :return:Expected Present Value (EPV) for payments of 1/m per fraction of time
+        """
+        aux = self.naax(x + defer, n, m) * self.nEx(x, defer)
+        if x + 1 + n + defer <= self.w + 1:
+            if x + 1 + n + defer <= self.w:
+                Nx2 = self.Nx[x + 1 + n + defer]
+            else:
+                Nx2 = 0
+            self.msn.append(
+                f"{defer}|{n}_aax_{x}=[{self.Nx[x + 1 + defer] - Nx2}/{self.Dx[x + defer]}"
+                f"+({m}+1)/({m}*2)*(1-{self.Dx[x + n + defer]}/{self.Dx[x + defer]})]"
+                f"*{self.Dx[x + defer]}/{self.Dx[x]}")
+        else:
+            return self.t_aax(x=x, m=m, defer=defer)
+        return aux
